@@ -2,16 +2,27 @@
 #include <curl/curl.h>
 #include <jansson.h>
 #include <ncurses.h>
+#include <unistd.h>
+#include <signal.h>
+
 #include <string.h>
 /*
     Internally the person who initialtes the match is called the "HOST" and the other person
     who joins the game is the "GUEST"
 */
 
-#define GAME_MODE_HOST 1
-#define GAME_MODE_GUEST 1
+#define GAMER_ROLE_HOST 1
+#define GAMER_ROLE_GUEST 2
+
+#define GAME_MODE_SINGLEPLAYER 1
+#define GAME_MODE_MULTIPLAYER 2
+
+#define TIME_PER_QUESTION 22
+static void check_timer();
 
 
+int time_left = TIME_PER_QUESTION;
+int is_timeup = 0;
 struct question
 {
     char *question;
@@ -20,6 +31,14 @@ struct question
     char *category;
 };
 
+struct game_data
+{
+    int is_game_in_progress;
+    int game_mode; //
+    int player_role; // Host or guest player.
+    int score;
+    int id;
+}current_game_info = {0, -1, -1, 0, 110};
 
 /*
  log_messages to console or display to user
@@ -122,12 +141,11 @@ void parse_question(json_t *question_json, struct question *question)
 
 void display_question(struct question *question)
 {
-    mvprintw(3,4,"----%s----", question->question);
-    mvprintw(0, 0, "hello");
+    mvprintw(10,4,"----%s----", question->question);
     for(int i = 0; i < 4; i++)
     {
         //printf("\n %d. %s", i+1, question->choices[i]);
-        mvprintw(5 + i, 4, "%d. %s", i+1, question->choices[i]);
+        mvprintw(13 + i, 4, "%d. %s", i+1, question->choices[i]);
     }
     //printw("\n----\n");
 
@@ -141,7 +159,12 @@ int check_answer(struct question *question, int answer)
         return 0;
 }
 
-
+void start_singleplayer();
+void start_multiplayer();
+void display_logo();
+void display_initial_screen();
+void update_score();
+void reset_game();
 int main(int argc, char const *argv[])
 {
     /*
@@ -152,45 +175,135 @@ int main(int argc, char const *argv[])
     update_db on each question
     done
     */
+    char ch;
+
+
+    signal(SIGALRM, check_timer);
+    initscr();				/* start the curses mode */
+    start_color();
+
+
+    init_pair(1, COLOR_BLACK, COLOR_WHITE); // For the timer
+    init_pair(2, COLOR_WHITE, COLOR_GREEN); // Correct answer
+    init_pair(3, COLOR_RED, COLOR_WHITE); // Incorrect answer
+
+    clear();
+    display_initial_screen();
+    refresh();
+    reset_game();
+    while(1)
+    {
+
+        int is_quit_signal = 0;
+        if((ch = getch()) == ERR)
+        {
+            
+        }
+        else{
+            switch(ch)
+            {
+                case '1':
+                    start_singleplayer();
+                    clear();
+                    display_initial_screen();
+                    refresh();
+                    reset_game();
+                    break;
+                case 'q':
+                case 'Q':
+                    is_quit_signal = 1;
+                    break;
+                default:
+                    mvprintw(11, 12, "Enter a valid option");
+                    move(10, 28);
+                    refresh();
+            }   
+        }
+    if(is_quit_signal)
+        break;
+    }
+    current_game_info.is_game_in_progress = 0;
+    endwin();
+
+    return 0;
+
+}
+
+void start_singleplayer()
+{
     json_t *json_questions_array, *json_question;
     struct question *question;
     question = malloc(sizeof(struct question));
     int current_question_number = 0;
 
+    current_game_info.game_mode = GAME_MODE_SINGLEPLAYER;
+    current_game_info.is_game_in_progress = 1;
+
     char mesg[]="Enter an answer( 1 or 2 or 3 or 4) : ", ch;		/* message to be appeared on the screen */
-    char str[80];
     int row,col;				/* to store the number of rows and *
                         * the number of colums of the screen */
-    initscr();				/* start the curses mode */
-    clear();
+
     nodelay(stdscr, TRUE);
     getmaxyx(stdscr,row,col);		/* get the number of rows and columns */
-    //mvprintw(row/2,(col-strlen(mesg))/2,"%s",mesg);
                             /* print the message at the center of the screen */
     refresh();
+
     json_questions_array = load_questions_array();
+
     json_array_foreach(json_questions_array, current_question_number, json_question)
     {
         //The answer that will be inputted by the user.
         int user_answer = 0;
+        time_left = TIME_PER_QUESTION;
+        check_timer();
         parse_question(json_question, question);
         clear();
+        display_logo();
         display_question(question);
-
+        update_score();
         //printf("Enter an answer( 1 or 2 or 3 or 4) : ");
-        mvprintw(10,(col-strlen(mesg))/2,mesg);
+        mvprintw(18,(col-strlen(mesg))/2,mesg);
         //scanf("%d", &user_answer);
         for (;;) {
+            if(is_timeup)
+            {
+                mvprintw(13, 4, "Uh-oh , Time's up ! Press any key to continue ");
+                break;
+            }
             if ((ch = getch()) == ERR) {
 
             }
             else {
                 if(ch == '1' || ch == '2' || ch == '3' || ch == '4')
                 {
+                    int time_taken = TIME_PER_QUESTION - time_left;
+                    time_left = -1;
+
+
                     int choice = ch - 48;
-                    mvprintw(11, 4, "Your answer : %s", question->choices[choice - 1]);
-                    mvprintw(12, 4, "The answer is %d", check_answer(question, choice));
-                    mvprintw(13, 4, "Press any key to continue");
+                    if(check_answer(question, choice))
+                    {
+                        //THe answer is correct if we get here.
+                        current_game_info.score += 20 - time_taken;
+                        attron(COLOR_PAIR(2));
+                        mvprintw(22, 4, "  %s  ", question->choices[choice - 1]);
+                        attroff(COLOR_PAIR(2));
+                    }
+                    else
+                    {
+                        attron(COLOR_PAIR(3));
+                        mvprintw(22, 4, "  %s  ", question->choices[choice - 1]);
+                        attroff(COLOR_PAIR(3));
+                        printw("  ");
+                        attron(COLOR_PAIR(2));
+                        printw("  %s  ", question->correct_answer);
+                        attroff(COLOR_PAIR(2));
+
+                    }
+
+                    //mvprintw(12, 4, "The answer is %d", check_answer(question, choice));
+                    update_score();
+                    mvprintw(23, 4, "Press any key to continue ");
                     break;
                 }
             }
@@ -207,8 +320,76 @@ int main(int argc, char const *argv[])
         }
     }
     getch();
-    endwin();
-    return 0;
+}
+
+void check_timer()
+{
+    if(current_game_info.is_game_in_progress)
+    {
+        int x, y;
+        getyx(stdscr, y, x);
+        if(time_left > 0)
+        {
+            time_left--;
+            is_timeup = 0;
+            alarm(1);
+            attron(COLOR_PAIR(1));
+            mvprintw(2, getmaxx(stdscr) - 20, "%2d", time_left);
+            attroff(COLOR_PAIR(1));
+            move(y,x);
+        }
+        else
+        {
+            move(y,x);
+            time_left = TIME_PER_QUESTION;
+            is_timeup = 1;
+        }
+
+    }
+}
+
+void display_logo()
+{
+    char logo[250] = "\
+    ___            _\n \
+  / _ \\   _   _  (_)  ____  ____  _   _ \n \
+ | | | | | | | | | | |_  / |_  / | | | | \n \
+ | |_| | | |_| | | |  / /   / /  | |_| | \n \
+  \\__ \\   \\__,_| |_| /___| /___| \\__,  | \n \
+                                  |___/ \n\n";
+
+    mvprintw(0,0,logo);
 
 }
 
+void display_initial_screen()
+{
+    display_logo();
+    mvprintw(9, 12, "1. Start Singleplayer quiz");
+    mvprintw(10, 12, "Enter a choice: ");
+}
+
+
+void update_score()
+{
+    attron(COLOR_PAIR(1));
+    mvprintw(2, getmaxx(stdscr) - 40, "Score : %d", current_game_info.score);
+    attroff(COLOR_PAIR(1));
+
+}
+
+void reset_game()
+{
+    current_game_info.score = 0;
+    current_game_info.game_mode = -1;
+    current_game_info.is_game_in_progress = 0;
+    current_game_info.player_role = -1;
+}
+
+
+void start_multiplayer()
+{
+    // Host
+
+    
+}
