@@ -4,8 +4,13 @@
 #include <ncurses.h>
 #include <unistd.h>
 #include <signal.h>
-
 #include <string.h>
+#include<pthread.h>
+
+#include "firebase.c"
+
+#define BASE_URL_FORMAT "https://quizzy-4d728.firebaseio.com/games"
+#define GAME_SESSION_URL_FORMAT "https://quizzy-4d728.firebaseio.com/games/%d.json"
 /*
     Internally the person who initialtes the match is called the "HOST" and the other person
     who joins the game is the "GUEST"
@@ -18,8 +23,9 @@
 #define GAME_MODE_MULTIPLAYER 2
 
 #define TIME_PER_QUESTION 22
-static void check_timer();
 
+static void check_timer();
+enum Game_State {NOT_IN_MATCH = 0, WAITING_FOR_OPPONENT_TO_JOIN, OPPONENT_JOINED, QUIZ_STARTED, PAUSED_BETWEEN_QUESTION, IN_QUESTION};
 
 int time_left = TIME_PER_QUESTION;
 int is_timeup = 0;
@@ -31,6 +37,20 @@ struct question
     char *category;
 };
 
+
+struct multiplayer_data
+{
+    int session;
+    
+}multiplayer_data;
+
+struct player
+{
+    char player_role_text[25]; 
+    int score;
+    int current_question_number;
+}opponent;
+
 struct game_data
 {
     int is_game_in_progress;
@@ -38,7 +58,8 @@ struct game_data
     int player_role; // Host or guest player.
     int score;
     int id;
-}current_game_info = {0, -1, -1, 0, 110};
+    enum Game_State state;
+}current_game_info = {0, -1, -1, 0, 110, 0};
 
 /*
  log_messages to console or display to user
@@ -209,6 +230,8 @@ int main(int argc, char const *argv[])
                     refresh();
                     reset_game();
                     break;
+                case '2':
+                    start_multiplayer();
                 case 'q':
                 case 'Q':
                     is_quit_signal = 1;
@@ -267,7 +290,7 @@ void start_singleplayer()
         for (;;) {
             if(is_timeup)
             {
-                mvprintw(13, 4, "Uh-oh , Time's up ! Press any key to continue ");
+                mvprintw(23, 4, "Uh-oh , Time's up ! Press any key to continue ");
                 break;
             }
             if ((ch = getch()) == ERR) {
@@ -310,7 +333,8 @@ void start_singleplayer()
         }
 
         //Wait for user interaction before proceeding.
-        for (;;) {
+        for (;;)
+        {
             if ((ch = getch()) == ERR) {
 
             }
@@ -387,9 +411,123 @@ void reset_game()
 }
 
 
+json_t * build_initial_json(int id)
+{
+    json_t *root, *player_info, *player;
+    json_error_t error;
+
+    char id_str[20];
+    char player_name[15];
+    if(current_game_info.player_role == GAMER_ROLE_HOST)
+    {
+        strcpy(player_name, "player_host");
+    }
+    else
+    {
+        strcpy(player_name, "player_guest");
+    }
+    snprintf(id_str, 12, "%d", id);
+    root = json_object();
+    player = json_object();
+    player_info = json_object();
+    json_object_set(player_info, "score", json_integer(-1));
+    json_object_set(player_info, "current_question", json_integer(-1));
+
+    json_object_set(player,player_name, player_info);
+    json_object_set(root, id_str, player);
+
+    //printf("%s", json_dumps(root, 0));
+
+    return root;
+}
+
+/*thread function definition*/
+void* check_firebase(void* args)
+{
+    static int count = 0;
+    while(1)
+    {
+        // count++;
+        char *text;
+        char url[URL_SIZE];
+        sprintf(url, "%s/%d/%s.json",BASE_URL_FORMAT, current_game_info.id, opponent.player_role_text);
+        text = request(url);
+        mvprintw(15, 5, "%s", text);
+        json_error_t error;
+        json_t *root = json_loads(text, 0, &error);
+        if(!json_is_null(root))
+        {
+            current_game_info.state = OPPONENT_JOINED;
+            opponent.score = json_integer_value(json_object_get(root, "score"));
+            opponent.current_question_number = json_integer_value(json_object_get(root, "current_question"));
+        }
+        // printf("%s  %d", json_string_value(json_object_get(root, "last")), json_is_object(root));
+        printw("\n\n%s  %d",url, count);
+        printw("\n\nopponent: %d %d", opponent.score, opponent.current_question_number);
+        // getch();
+        count++;
+        //mvprintw(LINES-5,5,"%d", count);
+        //printw("ss");
+        refresh();
+        //sleep(1);
+    }
+}
 void start_multiplayer()
 {
     // Host
-
+    json_t *json;
+    char *text = NULL;
     
+    /*creating thread id*/
+    pthread_t id;
+    int ret;
+    
+    current_game_info.game_mode  = GAME_MODE_MULTIPLAYER;
+    current_game_info.player_role =  GAMER_ROLE_HOST;
+    current_game_info.id = 12323;
+    current_game_info.is_game_in_progress = 1;
+    strcpy(opponent.player_role_text, "player_guest");
+    multiplayer_data.session = 1233;
+
+    char url[URL_SIZE];
+    clear(); //clear the contents of the screen
+    display_logo();
+    mvprintw(10, 4, "Creating a game... Please wait" );
+    refresh();
+
+
+    snprintf(url, URL_SIZE,"%s%s", BASE_URL_FORMAT, ".json");
+
+    json = build_initial_json(1233); // TODO: Randomize this text
+    json_dumps(json, 0);
+
+    text = patch(url, json);
+    move(10,0);
+    clrtoeol();
+    if(text != NULL)
+    {
+        mvprintw(10, 4, "Game Created - ID: %d", current_game_info.id);
+        mvprintw(11, 4, "Waiting for opponent to join...");
+        current_game_info.state = WAITING_FOR_OPPONENT_TO_JOIN;
+        /*creating thread for polling the databse*/
+        ret=pthread_create(&id,NULL,&check_firebase,NULL);
+        if(ret != 0){
+            clear();
+            mvprintw(3, 4, "An error occurred :( \n\nExiting ...");
+            sleep(5);
+            return;
+        }
+    }
+    else
+    {
+        mvprintw(10, 4, "An error occured... Exiting...");
+        sleep(4);
+        reset_game();
+        return;
+    }
+    //Wait for user interaction before proceeding.
+    for (;;)
+    {
+
+    }
 }
