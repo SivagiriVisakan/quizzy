@@ -6,7 +6,8 @@
 #include <signal.h>
 #include <string.h>
 #include<pthread.h>
-
+#include<time.h>
+#include<stdlib.h>
 #include "firebase.c"
 
 #define BASE_URL_FORMAT "https://quizzy-4d728.firebaseio.com/games"
@@ -54,13 +55,17 @@ struct player
 struct game_data
 {
     int is_game_in_progress;
+    int progress; //No of questions viewed
     int game_mode; //
     int player_role; // Host or guest player.
+    char player_role_text[25];
     int score;
     int id;
     enum Game_State state;
-}current_game_info = {0, -1, -1, 0, 110, 0};
+}current_game_info = {0, 0, -1, -1,"\0", 0, 110, 0};
 
+
+void start_multiplayer_as_guest(int);
 /*
  log_messages to console or display to user
  severity: 1 - warning
@@ -89,12 +94,22 @@ void shuffle(char array[][100], size_t n)
   }
 }
 
+void load_questions_into_file()
+{
+    FILE *fp  = fopen("question.json", "w+");
+    int status;
+    char url[53] = "https://opentdb.com/api.php?amount=10&type=multiple";
+    status  = request_and_save_to_file(url, fp);
+    fclose(fp);
+}
+
 json_t * load_questions_array()
 {
     // The root node of the questions data returned by OpenTriviaDb
     json_t *root, *response_code, *questions;
     json_error_t *error;
-    root = json_load_file("questions.json", 0, error);
+    load_questions_into_file();
+    root = json_load_file("question.json", 0, error);
     
     if (root == NULL) {
         log_message("\n\nAn error occured while loading questions :( \n\n", 0);
@@ -207,6 +222,7 @@ int main(int argc, char const *argv[])
     init_pair(1, COLOR_BLACK, COLOR_WHITE); // For the timer
     init_pair(2, COLOR_WHITE, COLOR_GREEN); // Correct answer
     init_pair(3, COLOR_RED, COLOR_WHITE); // Incorrect answer
+    init_pair(4, COLOR_BLACK, COLOR_YELLOW); // Incorrect answer
 
     clear();
     display_initial_screen();
@@ -224,6 +240,7 @@ int main(int argc, char const *argv[])
             switch(ch)
             {
                 case '1':
+                    mvprintw(0,0,"jkhvgcfxcvhjkl"); refresh();
                     start_singleplayer();
                     clear();
                     display_initial_screen();
@@ -232,12 +249,24 @@ int main(int argc, char const *argv[])
                     break;
                 case '2':
                     start_multiplayer();
+                    clear();
+                    display_initial_screen();
+                    refresh();
+                    reset_game();
+
+                case '3':
+                    start_multiplayer_as_guest(12);
+                    clear();
+                    display_initial_screen();
+                    refresh();
+                    reset_game();
+
                 case 'q':
                 case 'Q':
                     is_quit_signal = 1;
                     break;
                 default:
-                    mvprintw(11, 12, "Enter a valid option");
+                    mvprintw(14, 12, "Enter a valid option");
                     move(10, 28);
                     refresh();
             }   
@@ -352,23 +381,36 @@ void check_timer()
     {
         int x, y;
         getyx(stdscr, y, x);
+        if(current_game_info.game_mode == GAME_MODE_MULTIPLAYER && current_game_info.state >= OPPONENT_JOINED)
+        {
+            attron(COLOR_PAIR(4));
+            mvprintw(4, getmaxx(stdscr) - 40, "--Opponent--");
+            move(5,  getmaxx(stdscr) - 40);
+            clrtoeol();
+            move(6,  getmaxx(stdscr) - 40);
+            clrtoeol();
+            mvprintw(5, getmaxx(stdscr) - 40, "Score : %d", opponent.score);
+            mvprintw(6, getmaxx(stdscr) - 40, "Progress : %d/10", opponent.current_question_number);
+            attroff(COLOR_PAIR(4));
+        }
+
         if(time_left > 0)
         {
             time_left--;
             is_timeup = 0;
             alarm(1);
             attron(COLOR_PAIR(1));
-            mvprintw(2, getmaxx(stdscr) - 20, "%2d", time_left);
+            mvprintw(2, getmaxx(stdscr) - 80, "TIME LEFT: %2d", time_left);
             attroff(COLOR_PAIR(1));
-            move(y,x);
+            //move(y,x);
         }
         else
         {
-            move(y,x);
+            // move(y,x);
             time_left = TIME_PER_QUESTION;
             is_timeup = 1;
         }
-
+        move(y,x);
     }
 }
 
@@ -390,16 +432,45 @@ void display_initial_screen()
 {
     display_logo();
     mvprintw(9, 12, "1. Start Singleplayer quiz");
-    mvprintw(10, 12, "Enter a choice: ");
+    mvprintw(10, 12, "2. Host a Multiplayer quiz");
+    mvprintw(11, 12, "3. Join a Multiplayer quiz");
+    mvprintw(13, 12, "Enter a choice: ");
 }
 
+void update_progress_online()
+{
+        char *text;
+        char url[URL_SIZE];
+        json_t *data;
+        sprintf(url, "%s/%d/%s.json",BASE_URL_FORMAT, current_game_info.id, current_game_info.player_role_text);
+        data = json_object();
+        json_object_set(data, "score", json_integer(current_game_info.score));
+        json_object_set(data, "current_question", json_integer(current_game_info.progress));
+        char *d = json_dumps(data, 0);
+        text = patch(url, data);
 
+        json_error_t error;
+        json_t *root = json_loads(text, 0, &error);
+        if(json_is_null(root))
+        {
+            clear();
+            mvprintw(0,0, "Quizzy encountered an error... Exiting...");
+            refresh();
+            sleep(5);
+            exit(0);
+        }
+}
 void update_score()
 {
     attron(COLOR_PAIR(1));
-    mvprintw(2, getmaxx(stdscr) - 40, "Score : %d", current_game_info.score);
+    mvprintw(2, getmaxx(stdscr) - 60, "Score : %d", current_game_info.score);
+    mvprintw(2, getmaxx(stdscr) - 40, "Progress : %d/10", current_game_info.progress);
+    refresh();
     attroff(COLOR_PAIR(1));
-
+    if(current_game_info.game_mode == GAME_MODE_MULTIPLAYER)
+    {
+        update_progress_online();
+    }
 }
 
 void reset_game()
@@ -441,6 +512,19 @@ json_t * build_initial_json(int id)
     return root;
 }
 
+void update_opponent_display()
+{
+    int x, y;
+    getyx(stdscr, y, x);
+    attron(COLOR_PAIR(1));
+    mvprintw(3, getmaxx(stdscr) - 40, "--Opponent--");
+    mvprintw(4, getmaxx(stdscr) - 40, "Score : %d", opponent.score);
+    mvprintw(5, getmaxx(stdscr) - 40, "Progress : %d/10", opponent.current_question_number);
+    attroff(COLOR_PAIR(1));
+    move(y,x);
+    refresh();
+}
+
 /*thread function definition*/
 void* check_firebase(void* args)
 {
@@ -452,26 +536,30 @@ void* check_firebase(void* args)
         char url[URL_SIZE];
         sprintf(url, "%s/%d/%s.json",BASE_URL_FORMAT, current_game_info.id, opponent.player_role_text);
         text = request(url);
-        mvprintw(15, 5, "%s", text);
+        // mvprintw(0, 5, "%s", text);
         json_error_t error;
         json_t *root = json_loads(text, 0, &error);
-        if(!json_is_null(root))
+        if(!json_is_null(root) && root != NULL)
         {
             current_game_info.state = OPPONENT_JOINED;
             opponent.score = json_integer_value(json_object_get(root, "score"));
             opponent.current_question_number = json_integer_value(json_object_get(root, "current_question"));
+            //update_opponent_display();
         }
         // printf("%s  %d", json_string_value(json_object_get(root, "last")), json_is_object(root));
-        printw("\n\n%s  %d",url, count);
-        printw("\n\nopponent: %d %d", opponent.score, opponent.current_question_number);
+        // printw("\n\n%s  %d",url, count);
+        // printw("\n\nopponent: %d %d", opponent.score, opponent.current_question_number);
         // getch();
         count++;
         //mvprintw(LINES-5,5,"%d", count);
         //printw("ss");
         refresh();
-        //sleep(1);
+        sleep(1);
     }
 }
+
+void start_quizzing_multiplayer(int);
+
 void start_multiplayer()
 {
     // Host
@@ -484,9 +572,10 @@ void start_multiplayer()
     
     current_game_info.game_mode  = GAME_MODE_MULTIPLAYER;
     current_game_info.player_role =  GAMER_ROLE_HOST;
-    current_game_info.id = 12323;
+    current_game_info.id = rand()/10000;
     current_game_info.is_game_in_progress = 1;
     strcpy(opponent.player_role_text, "player_guest");
+    strcpy(current_game_info.player_role_text, "player_host");
     multiplayer_data.session = 1233;
 
     char url[URL_SIZE];
@@ -498,7 +587,7 @@ void start_multiplayer()
 
     snprintf(url, URL_SIZE,"%s%s", BASE_URL_FORMAT, ".json");
 
-    json = build_initial_json(1233); // TODO: Randomize this text
+    json = build_initial_json(current_game_info.id); // TODO: Randomize this text
     json_dumps(json, 0);
 
     text = patch(url, json);
@@ -528,6 +617,191 @@ void start_multiplayer()
     //Wait for user interaction before proceeding.
     for (;;)
     {
+        if(current_game_info.state == OPPONENT_JOINED)
+        {
+            start_quizzing_multiplayer(1);
+            //TODO: Add a results screen here
+            break;
+        }
+    }
+}
 
+
+void start_quizzing_multiplayer(int is_host)
+{
+    json_t *json_questions_array, *json_question;
+    struct question *question;
+    question = malloc(sizeof(struct question));
+    int current_question_number = 0;
+
+    current_game_info.state = IN_QUESTION;
+    //current_game_info.game_mode = GAME_MODE_SINGLEPLAYER;
+    current_game_info.is_game_in_progress = 1;
+
+    char mesg[]="Enter an answer( 1 or 2 or 3 or 4) : ", ch;		/* message to be appeared on the screen */
+    int row,col;				/* to store the number of rows and *
+                        * the number of colums of the screen */
+
+    nodelay(stdscr, TRUE);
+    getmaxyx(stdscr,row,col);		/* get the number of rows and columns */
+                            /* print the message at the center of the screen */
+    refresh();
+
+    json_questions_array = load_questions_array();
+
+    json_array_foreach(json_questions_array, current_question_number, json_question)
+    {
+        //The answer that will be inputted by the user.
+        int user_answer = 0;
+
+        current_game_info.progress = current_question_number + 1;
+        time_left = TIME_PER_QUESTION;
+        check_timer();
+        parse_question(json_question, question);
+        clear();
+        display_logo();
+        display_question(question);
+        update_score();
+        //update_progress_online();
+        //printf("Enter an answer( 1 or 2 or 3 or 4) : ");
+        mvprintw(18,(col-strlen(mesg))/2,mesg);
+        //scanf("%d", &user_answer);
+        for (;;) {
+            if(is_timeup)
+            {
+                mvprintw(23, 4, "Uh-oh , Time's up ! Press any key to continue ");
+                break;
+            }
+            if ((ch = getch()) == ERR) {
+
+            }
+            else {
+                if(ch == '1' || ch == '2' || ch == '3' || ch == '4')
+                {
+                    int time_taken = TIME_PER_QUESTION - time_left;
+                    time_left = -1;
+
+
+                    int choice = ch - 48;
+                    if(check_answer(question, choice))
+                    {
+                        //THe answer is correct if we get here.
+                        current_game_info.score += 20 - time_taken;
+                        attron(COLOR_PAIR(2));
+                        mvprintw(22, 4, "  %s  ", question->choices[choice - 1]);
+                        attroff(COLOR_PAIR(2));
+                    }
+                    else
+                    {
+                        attron(COLOR_PAIR(3));
+                        mvprintw(22, 4, "  %s  ", question->choices[choice - 1]);
+                        attroff(COLOR_PAIR(3));
+                        printw("  ");
+                        attron(COLOR_PAIR(2));
+                        printw("  %s  ", question->correct_answer);
+                        attroff(COLOR_PAIR(2));
+
+                    }
+
+                    //mvprintw(12, 4, "The answer is %d", check_answer(question, choice));
+                    update_score();
+                    mvprintw(23, 4, "Press any key to continue ");
+                    break;
+                }
+            }
+        }
+
+        //Wait for user interaction before proceeding.
+        for (;;)
+        {
+            if ((ch = getch()) == ERR) {
+
+            }
+            else {
+                break;
+            }
+        }
+    }
+    getch();
+}
+
+json_t * build_initial_json_for_guest()
+{
+    json_t *root, *player_info;
+    root = json_object();
+    player_info = json_object();
+    json_object_set(player_info, "current_question", json_integer(current_game_info.progress));
+    json_object_set(player_info, "score", json_integer(current_game_info.score));
+
+    json_object_set(root, "player_guest", player_info);
+
+    return root;
+}
+
+void start_multiplayer_as_guest(int game_id)
+{
+    // Guest
+    json_t *json;
+    char *text = NULL;
+
+    /*creating thread id*/
+    pthread_t id;
+    int ret;
+    
+    current_game_info.game_mode  = GAME_MODE_MULTIPLAYER;
+    current_game_info.player_role =  GAMER_ROLE_GUEST;
+    // current_game_info.id = 12323;
+    current_game_info.is_game_in_progress = 1;
+    strcpy(opponent.player_role_text, "player_host");
+    multiplayer_data.session = 1233;
+    current_game_info.score = 44444;
+    strcpy(current_game_info.player_role_text, "player_guest");
+    char url[URL_SIZE];
+    clear(); //clear the contents of the screen
+    display_logo();
+    mvprintw(10, 4, "Enter the Game ID (Can be found from the host): " );
+    refresh();
+    scanw("%d", &current_game_info.id);
+
+    snprintf(url, URL_SIZE,"%s%s%d%s", BASE_URL_FORMAT, "/", current_game_info.id, ".json");
+    //mvprintw(20, 10, url);
+    refresh();
+    json = build_initial_json_for_guest(); // TODO: Randomize this text
+    json_dumps(json, 0);
+
+    text = patch(url, json);
+    printw(text);
+    refresh();
+    // move(10,0);
+    // clrtoeol();
+    if(text != NULL)
+    {
+        mvprintw(10, 4, "Joined game %d", current_game_info.id);
+        mvprintw(11, 4, "Starting game . . .");
+        current_game_info.state = OPPONENT_JOINED;
+        /*creating thread for polling the databse*/
+        ret=pthread_create(&id,NULL,&check_firebase,NULL);
+        if(ret != 0){
+            clear();
+            mvprintw(3, 4, "An error occurred :( \n\nExiting ...");
+            sleep(5);
+            return;
+        }
+    }
+    else
+    {
+        mvprintw(10, 4, "An error occured... Exiting...");
+        sleep(4);
+        reset_game();
+        return;
+    }
+    //Wait for user interaction before proceeding.
+    for (;;)
+    {
+        if(current_game_info.state == OPPONENT_JOINED)
+        {
+            start_quizzing_multiplayer(0);
+            break;
+        }
     }
 }
